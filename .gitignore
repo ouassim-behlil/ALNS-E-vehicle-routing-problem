@@ -1,0 +1,7 @@
+*.xml
+*.html
+*.graphml
+*.tex
+cache/*
+output/*
+__*
