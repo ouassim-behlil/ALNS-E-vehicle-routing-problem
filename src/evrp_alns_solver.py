@@ -47,6 +47,13 @@ def parse_evrp_instance(xml_path):
             'load': int(req.find('requested_load').text)
         })
 
+    # Ensure every customer node has a request (default load=1) -- requirement: all customers must be visited
+    customer_ids = [n['id'] for n in nodes if n['type'] == 'customer']
+    existing = set(r['node_id'] for r in requests)
+    for cid in customer_ids:
+        if cid not in existing:
+            requests.append({'node_id': cid, 'load': 1})
+
     fleet = []
     for v in root.find('fleet'):
         fleet.append({
@@ -57,7 +64,23 @@ def parse_evrp_instance(xml_path):
             'quantity': int(v.find('quantity').text)
         })
 
-    return nodes, links, requests, fleet
+    # parse drivers if present
+    drivers = []
+    drivers_elem = root.find('drivers')
+    if drivers_elem is not None:
+        for d in drivers_elem:
+            try:
+                did = int(d.find('id').text)
+            except Exception:
+                did = None
+            drivers.append({
+                'id': did,
+                'name': d.find('name').text if d.find('name') is not None else None,
+                'shift_hours': float(d.find('shift_hours').text) if d.find('shift_hours') is not None else None,
+                'skill_level': int(d.find('skill_level').text) if d.find('skill_level') is not None else None,
+            })
+
+    return nodes, links, requests, fleet, drivers
 
 
 # --- 2. Build distance matrix ---
@@ -97,7 +120,7 @@ def build_distance_matrix(nodes, links):
 
 
 # --- 3. Simple initial solution (greedy capacity-respecting) ---
-def initial_solution(nodes, requests, fleet, dist):
+def initial_solution(nodes, requests, fleet, dist, drivers=None):
     depot_id = next((n['id'] for n in nodes if n['type'] == 'depot'), 0)
     customer_demands = {r['node_id']: r['load'] for r in requests}
     customers = list(customer_demands.keys())
@@ -155,7 +178,14 @@ def initial_solution(nodes, requests, fleet, dist):
             # couldn't add any customer (maybe no vehicle types) -> break to avoid infinite loop
             break
 
-    solution = {'routes': routes, 'unassigned': list(unassigned), 'vehicles': vehicles, 'depot': depot_id}
+    # assign drivers to routes in round-robin if drivers provided
+    driver_assignments = {}
+    if drivers and len(routes) > 0:
+        for idx, route in enumerate(routes):
+            driver = drivers[idx % len(drivers)]
+            driver_assignments[idx] = driver.get('id')
+
+    solution = {'routes': routes, 'unassigned': list(unassigned), 'vehicles': vehicles, 'depot': depot_id, 'driver_assignments': driver_assignments, 'drivers': drivers}
     return solution
 
 
@@ -168,11 +198,51 @@ def route_distance(route, dist):
         d += dist[a, b]
     return d
 
+
+def assign_drivers_to_routes(routes, drivers, dist, mu_matrix=None):
+    """Assign drivers to routes trying to balance total route durations (LPT heuristic).
+
+    Returns a dict mapping route_index -> driver_id and a dict driver_id -> total_time_hours
+    """
+    if not drivers:
+        return {}
+    # compute route durations
+    route_times = []
+    for idx, r in enumerate(routes):
+        t = 0.0
+        for i in range(len(r) - 1):
+            a = r[i]
+            b = r[i + 1]
+            if mu_matrix is not None:
+                t += mu_matrix[a, b]
+            else:
+                # fallback convert distance to time
+                # assume 40 km/h
+                t += dist[a, b] / 40.0
+        route_times.append((idx, t))
+
+    # sort routes by decreasing time
+    route_times.sort(key=lambda x: x[1], reverse=True)
+
+    # initialize driver loads
+    driver_loads = {d['id']: 0.0 for d in drivers}
+    assignments = {}
+    driver_ids = list(driver_loads.keys())
+    for idx, t in route_times:
+        # choose driver with smallest current load
+        best_driver = min(driver_ids, key=lambda did: driver_loads[did])
+        assignments[idx] = best_driver
+        driver_loads[best_driver] += t
+
+    return assignments, driver_loads
+
 def evaluate(solution, dist, customer_demands, weight_time=1.0, weight_balance=0.0, mu_matrix=None, penalty_unserved=1e5):
     total = 0.0
     routes = solution.get('routes', [])
     unassigned = set(solution.get('unassigned', []))
     depot = solution.get('depot', 0)
+    drivers = solution.get('drivers', None)
+    driver_assignments = solution.get('driver_assignments', None)
 
     # Objective 1: expected total travel time (using mu if available, otherwise convert distance)
     time_cost = 0.0
@@ -252,6 +322,32 @@ def evaluate(solution, dist, customer_demands, weight_time=1.0, weight_balance=0
         if not route_feasible_by_fleet(r):
             total += penalty_unserved * len([c for c in r if c != depot])
 
+    # --- Driver shift and balance penalties ---
+    # If drivers present, ensure assignments exist (recompute with LPT heuristic)
+    if drivers is not None:
+        if not driver_assignments:
+            # compute assignments
+            assignments, driver_loads = assign_drivers_to_routes(routes, drivers, dist, mu_matrix)
+        else:
+            assignments = driver_assignments
+            # compute loads
+            _, driver_loads = assign_drivers_to_routes(routes, drivers, dist, mu_matrix)
+
+        # penalty for drivers exceeding their shift_hours
+        for d in drivers:
+            did = d.get('id')
+            shift = d.get('shift_hours', 8)
+            load = driver_loads.get(did, 0.0)
+            # if load (hours) exceeds shift, add heavy penalty proportional to excess hours
+            if load > shift:
+                total += penalty_unserved * (load - shift)
+
+        # balance across drivers: variance of loads (hours) added scaled by weight_balance
+        if weight_balance > 0 and driver_loads:
+            vals = list(driver_loads.values())
+            mean = sum(vals) / len(vals)
+            var = sum((x - mean) ** 2 for x in vals) / len(vals)
+            total += weight_balance * var
     return total
 
 
@@ -298,6 +394,11 @@ def random_removal(state, rng, n_remove=2, **kwargs):
                 r.remove(cust)
         new_unassigned.add(cust)
     new_sol['unassigned'] = list(new_unassigned)
+    # recompute driver assignments if drivers present
+    if new_sol.get('drivers'):
+        assigns, loads = assign_drivers_to_routes(new_sol['routes'], new_sol['drivers'], state.dist, state.mu_matrix if hasattr(state, 'mu_matrix') else None)
+        new_sol['driver_assignments'] = assigns
+
     new_state = EVRPSolution(new_sol, state.dist, state.demands)
     # propagate mu and objective weights from current state
     try:
@@ -342,6 +443,11 @@ def greedy_insertion(state, rng, **kwargs):
             # open a new route; vehicles can perform multiple trips so we don't limit by vehicle count
             new_sol['routes'].append([depot, cust, depot])
     new_sol['unassigned'] = []
+    # recompute driver assignments if drivers info present
+    if new_sol.get('drivers'):
+        assigns, loads = assign_drivers_to_routes(new_sol['routes'], new_sol['drivers'], dist, state.mu_matrix if hasattr(state, 'mu_matrix') else None)
+        new_sol['driver_assignments'] = assigns
+
     new_state = EVRPSolution(new_sol, dist, demands)
     try:
         new_state.mu_matrix = state.mu_matrix
@@ -377,6 +483,11 @@ def swap_between_routes(state, rng, **kwargs):
                 r[idx] = c2
             elif v == c2:
                 r[idx] = c1
+    # recompute driver assignments if drivers present
+    if new_sol.get('drivers'):
+        assigns, loads = assign_drivers_to_routes(new_sol['routes'], new_sol['drivers'], state.dist, state.mu_matrix if hasattr(state, 'mu_matrix') else None)
+        new_sol['driver_assignments'] = assigns
+
     new_state = EVRPSolution(new_sol, state.dist, state.demands)
     try:
         new_state.mu_matrix = state.mu_matrix
@@ -388,9 +499,9 @@ def swap_between_routes(state, rng, **kwargs):
 
 
 # --- 6. Run ALNS ---
-def run_alns(nodes, links, requests, fleet, iterations=200, weight_time=1.0, weight_balance=0.0):
+def run_alns(nodes, links, requests, fleet, drivers=None, iterations=200, weight_time=1.0, weight_balance=0.0):
     dist, mu = build_distance_matrix(nodes, links)
-    sol0 = initial_solution(nodes, requests, fleet, dist)
+    sol0 = initial_solution(nodes, requests, fleet, dist, drivers=drivers)
     depot = next((n['id'] for n in nodes if n['type'] == 'depot'), 0)
     sol0['depot'] = depot
 
@@ -461,6 +572,13 @@ def save_solution(solution, nodes, filename='output/solution.json'):
         'routes': normalized_routes,
         'coords': coords,
     }
+    # include driver assignments if present
+    if 'driver_assignments' in solution:
+        out['driver_assignments'] = {int(k): int(v) if v is not None else None for k, v in solution['driver_assignments'].items()}
+
+    # include vehicle summary if present
+    if 'vehicles' in solution:
+        out['vehicles'] = solution['vehicles']
     with open(filename, 'w', encoding='utf-8') as f:
         json.dump(out, f, indent=2)
     print(f"Saved solution to {filename}")
@@ -473,12 +591,12 @@ def main(argv=None):
     parser.add_argument('--xml', default='evrp_rabat_data.xml', help='Input EVRP XML file')
     parser.add_argument('--iterations', type=int, default=400, help='ALNS iterations')
     parser.add_argument('--weight-time', type=float, default=1.0, help='Weight for expected travel time objective')
-    parser.add_argument('--weight-balance', type=float, default=0.0, help='Weight for balance (variance) objective')
+    parser.add_argument('--weight-balance', type=float, default=0.6, help='Weight for balance (variance) objective')
     args = parser.parse_args(argv)
 
     xml = args.xml
-    nodes, links, requests, fleet = parse_evrp_instance(xml)
-    solution, cost = run_alns(nodes, links, requests, fleet, iterations=args.iterations, weight_time=args.weight_time, weight_balance=args.weight_balance)
+    nodes, links, requests, fleet, drivers = parse_evrp_instance(xml)
+    solution, cost = run_alns(nodes, links, requests, fleet, drivers=drivers, iterations=args.iterations, weight_time=args.weight_time, weight_balance=args.weight_balance)
     dist, _ = build_distance_matrix(nodes, links)
     pretty_print_solution(solution, dist)
     save_solution(solution, nodes, filename='output/solution.json')

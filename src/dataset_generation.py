@@ -351,6 +351,23 @@ class EVRPDataGenerator:
             t['quantity'] = int(c)
 
         return vehicle_types
+
+    def generate_drivers(self, num_drivers: int | None = None):
+        """Generate a simple list of drivers with basic attributes.
+
+        Each driver gets an id and optionally a skill level or shift length in hours.
+        """
+        print("Generating drivers...")
+        drivers = []
+        total = num_drivers if num_drivers is not None else max(1, (self.total_vehicles or 6))
+        for i in range(total):
+            drivers.append({
+                'id': i,
+                'name': f"driver_{i}",
+                'shift_hours': 8,
+                'skill_level': random.choice([1, 2, 3])
+            })
+        return drivers
     
     def create_xml(self, nodes, links, requests, fleet, filename="evrp_rabat_data.xml"):
         """Create XML file with all EVRP data"""
@@ -412,6 +429,16 @@ class EVRPDataGenerator:
             ET.SubElement(vehicle_elem, "charging_technology").text = vehicle['charging_technology']
             ET.SubElement(vehicle_elem, "consumption_per_km").text = str(vehicle['consumption_per_km'])
             ET.SubElement(vehicle_elem, "quantity").text = str(vehicle['quantity'])
+        
+        # Add drivers (simple list)
+        drivers = self.generate_drivers()
+        drivers_elem = ET.SubElement(root, "drivers")
+        for d in drivers:
+            d_elem = ET.SubElement(drivers_elem, "driver")
+            ET.SubElement(d_elem, "id").text = str(d['id'])
+            ET.SubElement(d_elem, "name").text = d['name']
+            ET.SubElement(d_elem, "shift_hours").text = str(d['shift_hours'])
+            ET.SubElement(d_elem, "skill_level").text = str(d['skill_level'])
         
         # Pretty print XML
         rough_string = ET.tostring(root, 'unicode')
@@ -475,10 +502,10 @@ def main(argv=None):
 
     parser = argparse.ArgumentParser(description="Generate EVRP dataset (Rabat example)")
     parser.add_argument('--place', default="Rabat, Morocco", help='Place name used by OSMnx')
-    parser.add_argument('--num-nodes', type=int, default=10, help='Total number of nodes (including depot and charging stations)')
-    parser.add_argument('--num-requests', type=int, default=7, help='Number of customer requests')
-    parser.add_argument('--total-vehicles', type=int, default=None, help='Total number of vehicles to generate (overrides default distribution)')
-    parser.add_argument('--random-seed', type=int, default=None, help='Random seed for reproducibility')
+    parser.add_argument('--num-nodes', type=int, default=13, help='Total number of nodes (including depot and charging stations)')
+    parser.add_argument('--num-requests', type=int, default=10, help='Number of customer requests')
+    parser.add_argument('--total-vehicles', type=int, default=2, help='Total number of vehicles to generate (overrides default distribution)')
+    parser.add_argument('--random-seed', type=int, default=42, help='Random seed for reproducibility')
     parser.add_argument('--output', type=str, default='evrp_rabat_data.xml', help='Output XML filename')
 
     args = parser.parse_args(argv)
