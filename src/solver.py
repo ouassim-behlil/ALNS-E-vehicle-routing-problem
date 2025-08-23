@@ -11,7 +11,7 @@ from alns.stop import MaxIterations
 
 
 # --- 1. Parse EVRP instance from XML ---
-def parse_evrp_instance(xml_path):
+def parse_instance(xml_path):
     tree = ET.parse(xml_path)
     root = tree.getroot()
 
@@ -84,7 +84,7 @@ def parse_evrp_instance(xml_path):
 
 
 # --- 2. Build distance matrix ---
-def build_distance_matrix(nodes, links, sigma_alpha=0.2):
+def build_mats(nodes, links, sigma_alpha=0.2):
     """Build distance, expected travel time (mu) and sigma matrices.
 
     sigma_alpha: fallback relative stddev: sigma = alpha * mu when explicit sigma missing.
@@ -130,7 +130,7 @@ def build_distance_matrix(nodes, links, sigma_alpha=0.2):
 
 
 # --- 3. Simple initial solution (greedy capacity-respecting) ---
-def initial_solution(nodes, requests, fleet, dist, drivers=None):
+def init_solution(nodes, requests, fleet, dist, drivers=None):
     depot_id = next((n['id'] for n in nodes if n['type'] == 'depot'), 0)
     customer_demands = {r['node_id']: r['load'] for r in requests}
     customers = list(customer_demands.keys())
@@ -223,7 +223,7 @@ def initial_solution(nodes, requests, fleet, dist, drivers=None):
 
 
 # --- 4. Objective and helpers ---
-def route_distance(route, dist):
+def route_dist(route, dist):
     d = 0.0
     for i in range(len(route) - 1):
         a = route[i]
@@ -232,7 +232,7 @@ def route_distance(route, dist):
     return d
 
 
-def assign_drivers_to_routes(routes, drivers, dist, mu_matrix=None):
+def assign_drivers(routes, drivers, dist, mu_matrix=None):
     """Assign drivers to routes trying to balance total route durations (LPT heuristic).
 
     Returns a dict mapping route_index -> driver_id and a dict driver_id -> total_time_hours
@@ -269,7 +269,7 @@ def assign_drivers_to_routes(routes, drivers, dist, mu_matrix=None):
 
     return assignments, driver_loads
 
-def evaluate(solution, dist, customer_demands, weight_time=1.0, weight_balance=0.0, mu_matrix=None, sigma_matrix=None, monte_carlo=False, mc_samples=50, penalty_unserved=1e5, vehicles=None, nodes=None):
+def score(solution, dist, customer_demands, weight_time=1.0, weight_balance=0.0, mu_matrix=None, sigma_matrix=None, monte_carlo=False, mc_samples=50, penalty_unserved=1e5, vehicles=None, nodes=None):
     total = 0.0
     routes = solution.get('routes', [])
     unassigned = set(solution.get('unassigned', []))
@@ -391,11 +391,11 @@ def evaluate(solution, dist, customer_demands, weight_time=1.0, weight_balance=0
     if drivers is not None:
         if not driver_assignments:
             # compute assignments
-            assignments, driver_loads = assign_drivers_to_routes(routes, drivers, dist, mu_matrix)
+            assignments, driver_loads = assign_drivers(routes, drivers, dist, mu_matrix)
         else:
             assignments = driver_assignments
             # compute loads
-            _, driver_loads = assign_drivers_to_routes(routes, drivers, dist, mu_matrix)
+            _, driver_loads = assign_drivers(routes, drivers, dist, mu_matrix)
 
         # penalty for drivers exceeding their shift_hours
         for d in drivers:
@@ -416,7 +416,7 @@ def evaluate(solution, dist, customer_demands, weight_time=1.0, weight_balance=0
 
 
 # --- 5. ALNS operators (destroy & repair) ---
-class EVRPSolution:
+class Solution:
     """Concrete State implementing objective() for ALNS."""
 
     def __init__(self, solution, dist, demands):
@@ -426,13 +426,13 @@ class EVRPSolution:
         self.demands = demands
         self.vehicles = solution.get('vehicles', [])
         self.depot = solution.get('depot', 0)
-        # optional advanced fields (set by run_alns)
+        # optional advanced fields (set by solve)
         self.mu_matrix = None
         self.weight_time = 1.0
         self.weight_balance = 0.0
 
     def objective(self) -> float:
-        return evaluate(
+        return score(
             self.solution,
             self.dist,
             self.demands,
@@ -447,7 +447,7 @@ class EVRPSolution:
         )
 
 
-def random_removal(state, rng, n_remove=2, **kwargs):
+def remove_random(state, rng, n_remove=2, **kwargs):
     sol = state.solution
     depot = sol.get('depot', 0)
     all_customers = [c for r in sol['routes'] for c in r if c != depot]
@@ -465,10 +465,10 @@ def random_removal(state, rng, n_remove=2, **kwargs):
     new_sol['unassigned'] = list(new_unassigned)
     # recompute driver assignments if drivers present
     if new_sol.get('drivers'):
-        assigns, loads = assign_drivers_to_routes(new_sol['routes'], new_sol['drivers'], state.dist, state.mu_matrix if hasattr(state, 'mu_matrix') else None)
+        assigns, loads = assign_drivers(new_sol['routes'], new_sol['drivers'], state.dist, state.mu_matrix if hasattr(state, 'mu_matrix') else None)
         new_sol['driver_assignments'] = assigns
 
-    new_state = EVRPSolution(new_sol, state.dist, state.demands)
+    new_state = Solution(new_sol, state.dist, state.demands)
     # propagate mu and objective weights from current state
     try:
         new_state.mu_matrix = state.mu_matrix
@@ -483,7 +483,7 @@ def random_removal(state, rng, n_remove=2, **kwargs):
     return new_state
 
 
-def greedy_insertion(state, rng, **kwargs):
+def insert_greedy(state, rng, **kwargs):
     sol = state.solution
     dist = state.dist
     demands = state.demands
@@ -505,7 +505,7 @@ def greedy_insertion(state, rng, **kwargs):
                 continue
             for pos in range(1, len(r)):
                 r_copy = r[:pos] + [cust] + r[pos:]
-                cost = route_distance(r_copy, dist) - route_distance(r, dist)
+                cost = route_dist(r_copy, dist) - route_dist(r, dist)
                 if cost < best_cost:
                     best_cost = cost
                     best = (i, pos)
@@ -518,10 +518,10 @@ def greedy_insertion(state, rng, **kwargs):
     new_sol['unassigned'] = []
     # recompute driver assignments if drivers info present
     if new_sol.get('drivers'):
-        assigns, loads = assign_drivers_to_routes(new_sol['routes'], new_sol['drivers'], dist, state.mu_matrix if hasattr(state, 'mu_matrix') else None)
+        assigns, loads = assign_drivers(new_sol['routes'], new_sol['drivers'], dist, state.mu_matrix if hasattr(state, 'mu_matrix') else None)
         new_sol['driver_assignments'] = assigns
 
-    new_state = EVRPSolution(new_sol, dist, demands)
+    new_state = Solution(new_sol, dist, demands)
     try:
         new_state.mu_matrix = state.mu_matrix
         new_state.sigma_matrix = getattr(state, 'sigma_matrix', None)
@@ -535,7 +535,7 @@ def greedy_insertion(state, rng, **kwargs):
     return new_state
 
 
-def swap_between_routes(state, rng, **kwargs):
+def swap_routes(state, rng, **kwargs):
     sol = state.solution
     depot = sol.get('depot', 0)
     new_sol = copy.deepcopy(sol)
@@ -550,7 +550,7 @@ def swap_between_routes(state, rng, **kwargs):
     c1_candidates = [c for c in route1 if c != depot]
     c2_candidates = [c for c in route2 if c != depot]
     if not c1_candidates or not c2_candidates:
-        return EVRPSolution(new_sol, state.dist, state.demands)
+        return Solution(new_sol, state.dist, state.demands)
     c1 = rng.choice(c1_candidates)
     c2 = rng.choice(c2_candidates)
     # swap occurrences
@@ -562,10 +562,10 @@ def swap_between_routes(state, rng, **kwargs):
                 r[idx] = c1
     # recompute driver assignments if drivers present
     if new_sol.get('drivers'):
-        assigns, loads = assign_drivers_to_routes(new_sol['routes'], new_sol['drivers'], state.dist, state.mu_matrix if hasattr(state, 'mu_matrix') else None)
+        assigns, loads = assign_drivers(new_sol['routes'], new_sol['drivers'], state.dist, state.mu_matrix if hasattr(state, 'mu_matrix') else None)
         new_sol['driver_assignments'] = assigns
 
-    new_state = EVRPSolution(new_sol, state.dist, state.demands)
+    new_state = Solution(new_sol, state.dist, state.demands)
     try:
         new_state.mu_matrix = state.mu_matrix
         new_state.sigma_matrix = getattr(state, 'sigma_matrix', None)
@@ -580,18 +580,18 @@ def swap_between_routes(state, rng, **kwargs):
 
 
 # --- 6. Run ALNS ---
-def run_alns(nodes, links, requests, fleet, drivers=None, iterations=200, weight_time=1.0, weight_balance=0.0, monte_carlo=False, mc_samples=50, sigma_alpha=0.2):
-    dist, mu, sigma = build_distance_matrix(nodes, links, sigma_alpha=sigma_alpha)
-    sol0 = initial_solution(nodes, requests, fleet, dist, drivers=drivers)
+def solve(nodes, links, requests, fleet, drivers=None, iterations=200, weight_time=1.0, weight_balance=0.0, monte_carlo=False, mc_samples=50, sigma_alpha=0.2):
+    dist, mu, sigma = build_mats(nodes, links, sigma_alpha=sigma_alpha)
+    sol0 = init_solution(nodes, requests, fleet, dist, drivers=drivers)
     depot = next((n['id'] for n in nodes if n['type'] == 'depot'), 0)
     sol0['depot'] = depot
 
     demands = {r['node_id']: r['load'] for r in requests}
 
-    initial_cost = evaluate(sol0, dist, demands, mu_matrix=mu, sigma_matrix=sigma, monte_carlo=monte_carlo, mc_samples=mc_samples, vehicles=sol0.get('vehicles', []), nodes=nodes)
+    initial_cost = score(sol0, dist, demands, mu_matrix=mu, sigma_matrix=sigma, monte_carlo=monte_carlo, mc_samples=mc_samples, vehicles=sol0.get('vehicles', []), nodes=nodes)
     print(f"Initial solution cost: {initial_cost:.2f}")
 
-    initial_state = EVRPSolution(sol0, dist, demands)
+    initial_state = Solution(sol0, dist, demands)
     # attach mu/sigma matrices and objective weights to the state so operators can propagate them
     initial_state.mu_matrix = mu
     initial_state.sigma_matrix = sigma
@@ -603,14 +603,14 @@ def run_alns(nodes, links, requests, fleet, drivers=None, iterations=200, weight
 
     alns = ALNS()
     # register operators (destroy then repair)
-    alns.add_destroy_operator(random_removal, name='rand_rem_2')
+    alns.add_destroy_operator(remove_random, name='rand_rem_2')
     # register another destroy with larger removal via a small wrapper
     def rand_rem_4(state, rng, **kwargs):
-        return random_removal(state, rng, n_remove=4)
+        return remove_random(state, rng, n_remove=4)
 
     alns.add_destroy_operator(rand_rem_4, name='rand_rem_4')
-    alns.add_repair_operator(greedy_insertion, name='greedy_insert')
-    alns.add_repair_operator(swap_between_routes, name='swap')
+    alns.add_repair_operator(insert_greedy, name='greedy_insert')
+    alns.add_repair_operator(swap_routes, name='swap')
 
     # Create SA acceptor. autofit can produce start_temp < end_temp for small initial_cost;
     # instantiate a safe SA with start temp scaled from initial cost instead.
@@ -656,14 +656,14 @@ def run_alns(nodes, links, requests, fleet, drivers=None, iterations=200, weight
     return solution, best_cost
 
 
-def pretty_print_solution(solution, dist):
+def print_solution(solution, dist):
     print("\nSolution routes:")
     for i, r in enumerate(solution['routes']):
-        d = route_distance(r, dist)
+        d = route_dist(r, dist)
         print(f" Route {i+1}: {r}  distance={d:.2f}")
 
 
-def save_solution(solution, nodes, filename='output/solution.json'):
+def save(solution, nodes, filename='output/solution.json'):
     import json
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     # map node id -> lat/lon
@@ -703,11 +703,11 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     xml = args.xml
-    nodes, links, requests, fleet, drivers = parse_evrp_instance(xml)
-    solution, cost = run_alns(nodes, links, requests, fleet, drivers=drivers, iterations=args.iterations, weight_time=args.weight_time, weight_balance=args.weight_balance)
-    dist, _ = build_distance_matrix(nodes, links)
-    pretty_print_solution(solution, dist)
-    save_solution(solution, nodes, filename='output/solution.json')
+    nodes, links, requests, fleet, drivers = parse_instance(xml)
+    solution, cost = solve(nodes, links, requests, fleet, drivers=drivers, iterations=args.iterations, weight_time=args.weight_time, weight_balance=args.weight_balance)
+    dist, _, _ = build_mats(nodes, links)
+    print_solution(solution, dist)
+    save(solution, nodes, filename='output/solution.json')
 
 
 if __name__ == '__main__':
