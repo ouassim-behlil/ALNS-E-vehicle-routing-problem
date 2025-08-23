@@ -20,13 +20,13 @@ all: $(PLOT)
 $(SOL): $(INSTANCE)
 	@echo "Running solver on $(INSTANCE) (ITER=$(ITER)) -> $(SOL)"
 	@mkdir -p output
-	$(PY) -m src.evrp_file_solver $(INSTANCE) --iterations $(ITER) --output $(SOL)
+	$(PY) -m src.file_solver $(INSTANCE) --iterations $(ITER) --output $(SOL)
 
 
 # file rule to produce PNG plot from solution JSON
 $(PLOT): $(SOL)
 	@echo "Plotting solution $(SOL) -> $(PLOT)"
-	$(PY) src/plot_solution.py $(SOL) --out $(PLOT)
+	$(PY) src/plot.py $(SOL) --out $(PLOT)
 
 # phony alias
 plot: $(PLOT)

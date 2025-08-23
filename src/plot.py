@@ -1,4 +1,3 @@
-import json
 import argparse
 import os
 import matplotlib
@@ -7,9 +6,10 @@ if os.environ.get('DISPLAY','') == '':
     matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
+import json
 
 
-def plot_solution(sol_path, out_path=None, show=False, figsize=(10, 8)):
+def plot_sol(sol_path, out_path=None, show=False, figsize=(10, 8)):
     with open(sol_path, 'r') as f:
         sol = json.load(f)
 
@@ -64,7 +64,7 @@ def plot_solution(sol_path, out_path=None, show=False, figsize=(10, 8)):
         plt.show()
 
 
-def parse_evrp_file(path):
+def parse_file(path):
     """Lightweight parser for .evrp files used in this repo.
 
     Returns: file_ids list, coord_map dict {id: (x,y)}, set(station_ids), depot_ids list
@@ -130,8 +130,8 @@ def parse_evrp_file(path):
     return file_ids, coord_map, stations, depot_ids
 
 
-def plot_instance(evrp_path, out_path=None, show=False, figsize=(10, 8)):
-    file_ids, coord_map, stations, depot_ids = parse_evrp_file(evrp_path)
+def plot_inst(evrp_path, out_path=None, show=False, figsize=(10, 8)):
+    file_ids, coord_map, stations, depot_ids = parse_file(evrp_path)
     if not file_ids:
         raise ValueError(f'No nodes found in {evrp_path}')
     pts = np.array([coord_map[fid] for fid in file_ids])
@@ -182,9 +182,9 @@ if __name__ == '__main__':
         inst_out = None
         if args.out and args.solution is None:
             inst_out = args.out
-        plot_instance(args.instance, out_path=inst_out, show=args.show)
+        plot_inst(args.instance, out_path=inst_out, show=args.show)
     # Then plot solution if provided
     if args.solution:
-        plot_solution(args.solution, out_path=args.out, show=args.show)
+        plot_sol(args.solution, out_path=args.out, show=args.show)
     if not args.instance and not args.solution:
         parser.print_help()

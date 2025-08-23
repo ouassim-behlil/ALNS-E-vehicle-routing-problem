@@ -2,10 +2,10 @@ import math
 import sys
 from pathlib import Path
 
-from .evrp_alns_solver import run_alns, save_solution
+from .solver import solve, save
 
 
-def parse_evrp_file(path):
+def parse_file(path):
     header = {}
     node_coords = {}
     demands = {}
@@ -96,8 +96,8 @@ def parse_evrp_file(path):
     return header, node_coords, demands, stations, depot_ids
 
 
-def build_problem_from_evrp(path):
-    header, node_coords, demands, stations, depot_ids = parse_evrp_file(path)
+def build_problem(path):
+    header, node_coords, demands, stations, depot_ids = parse_file(path)
 
     dim = int(header.get('DIMENSION', len(node_coords)))
     vehicles = int(header.get('VEHICLES', 1))
@@ -167,16 +167,16 @@ def main(argv=None):
         print(f'Instance not found: {inst}')
         sys.exit(1)
 
-    nodes, links, requests, fleet = build_problem_from_evrp(str(inst))
+    nodes, links, requests, fleet = build_problem(str(inst))
 
     print(f'Parsed instance: nodes={len(nodes)} requests={len(requests)} fleet_types={len(fleet)}')
 
     # run ALNS
-    solution, cost = run_alns(nodes, links, requests, fleet, drivers=None, iterations=args.iterations)
+    solution, cost = solve(nodes, links, requests, fleet, drivers=None, iterations=args.iterations)
     print(f'Finished. cost={cost:.2f}')
 
     # save solution
-    save_solution(solution, nodes, filename=args.output)
+    save(solution, nodes, filename=args.output)
 
 
 if __name__ == '__main__':
