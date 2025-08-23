@@ -84,31 +84,40 @@ def parse_evrp_instance(xml_path):
 
 
 # --- 2. Build distance matrix ---
-def build_distance_matrix(nodes, links):
+def build_distance_matrix(nodes, links, sigma_alpha=0.2):
+    """Build distance, expected travel time (mu) and sigma matrices.
+
+    sigma_alpha: fallback relative stddev: sigma = alpha * mu when explicit sigma missing.
+    """
     n = len(nodes)
     big = 1e6
     dist = np.full((n, n), big)
-    mu = np.full((n, n), big)  # expected travel times (in hours or km-based proxy)
+    mu = np.full((n, n), big)  # expected travel times (in hours)
+    sigma = np.zeros((n, n))
     for i in range(n):
         dist[i, i] = 0.0
         mu[i, i] = 0.0
+        sigma[i, i] = 0.0
     for (i, j), data in links.items():
         if 0 <= i < n and 0 <= j < n:
             d = data['distance'] if isinstance(data, dict) else data
             dist[i, j] = d
-            # if travel_time provided, use that as mu (convert if necessary), otherwise use distance/avg_speed heuristic
+            # travel_time may be present (in hours) or not
             tt = None
             if isinstance(data, dict):
                 tt = data.get('travel_time')
             if tt is None:
-                # fallback: assume average speed 40 km/h to convert distance (km) to hours
                 mu[i, j] = dist[i, j] / 40.0
             else:
-                # travel_time may already be in hours or seconds; try to detect
                 if tt > 24:  # likely seconds -> convert to hours
                     mu[i, j] = tt / 3600.0
                 else:
                     mu[i, j] = tt
+            # optional sigma provided in links dict
+            if isinstance(data, dict) and data.get('sigma') is not None:
+                sigma[i, j] = float(data.get('sigma'))
+            else:
+                sigma[i, j] = max(1e-6, sigma_alpha * mu[i, j])
     # symmetrize when appropriate
     for i in range(n):
         for j in range(n):
@@ -116,7 +125,8 @@ def build_distance_matrix(nodes, links):
                 dist[j, i] = dist[i, j]
             if mu[i, j] < big and mu[j, i] >= big:
                 mu[j, i] = mu[i, j]
-    return dist, mu
+                sigma[j, i] = sigma[i, j]
+    return dist, mu, sigma
 
 
 # --- 3. Simple initial solution (greedy capacity-respecting) ---
@@ -136,14 +146,37 @@ def initial_solution(nodes, requests, fleet, dist, drivers=None):
 
     # Helper to check if a route can be served by at least one vehicle (capacity + energy)
     def route_can_be_served(route):
+        """Check if at least one vehicle type can perform the route considering load and battery
+        and allowing full recharge at charging stations (nodes marked 'charging_station')."""
         load = sum(customer_demands.get(c, 0) for c in route if c != depot_id)
-        distance = route_distance(route, dist)
+        # compute distance between successive nodes for energy consumption
         for v in vehicles:
-            if load <= v['capacity']:
-                # energy needed depends on consumption_per_km (kWh/km) and distance (km)
-                energy_needed = distance * v.get('consumption', v.get('consumption_per_km', 0.2))
-                if energy_needed <= v['energy']:
-                    return True
+            if load > v['capacity']:
+                continue
+            # simulate battery along route (full start)
+            battery = v.get('energy', 0.0)
+            consumption = v.get('consumption', v.get('consumption_per_km', 0.2))
+            feasible = True
+            for i in range(len(route) - 1):
+                a = route[i]
+                b = route[i + 1]
+                # energy consumed proportional to distance
+                energy_needed = dist[a, b] * consumption
+                battery -= energy_needed
+                # if next is charging station, recharge to full
+                # nodes list is available in outer scope; map id to type
+                try:
+                    ntype = nodes[a]['type'] if 0 <= a < len(nodes) else None
+                except Exception:
+                    ntype = None
+                # recharge if arriving at station
+                if 0 <= b < len(nodes) and nodes[b]['type'] == 'charging_station':
+                    battery = v.get('energy', 0.0)
+                if battery < -1e-6:
+                    feasible = False
+                    break
+            if feasible:
+                return True
         return False
 
     # assign customers greedily; allow opening as many routes as needed (vehicles may do multiple trips)
@@ -236,7 +269,7 @@ def assign_drivers_to_routes(routes, drivers, dist, mu_matrix=None):
 
     return assignments, driver_loads
 
-def evaluate(solution, dist, customer_demands, weight_time=1.0, weight_balance=0.0, mu_matrix=None, penalty_unserved=1e5):
+def evaluate(solution, dist, customer_demands, weight_time=1.0, weight_balance=0.0, mu_matrix=None, sigma_matrix=None, monte_carlo=False, mc_samples=50, penalty_unserved=1e5, vehicles=None, nodes=None):
     total = 0.0
     routes = solution.get('routes', [])
     unassigned = set(solution.get('unassigned', []))
@@ -244,18 +277,38 @@ def evaluate(solution, dist, customer_demands, weight_time=1.0, weight_balance=0
     drivers = solution.get('drivers', None)
     driver_assignments = solution.get('driver_assignments', None)
 
-    # Objective 1: expected total travel time (using mu if available, otherwise convert distance)
+    # Objective 1: expected total travel time (using mu if available), optionally via Monte Carlo
+    def route_expected_time(route):
+        # compute expected time deterministically (sum mu) or via MC
+        if not monte_carlo:
+            t = 0.0
+            for i in range(len(route) - 1):
+                a = route[i]
+                b = route[i + 1]
+                if mu_matrix is not None:
+                    t += mu_matrix[a, b]
+                else:
+                    t += dist[a, b] / 40.0
+            return t
+        else:
+            # Monte Carlo samples using mu and sigma matrices
+            samples = []
+            for _ in range(mc_samples):
+                s = 0.0
+                for i in range(len(route) - 1):
+                    a = route[i]
+                    b = route[i + 1]
+                    mu_ = mu_matrix[a, b] if mu_matrix is not None else dist[a, b] / 40.0
+                    sigma_ = sigma_matrix[a, b] if sigma_matrix is not None else max(1e-6, 0.2 * mu_)
+                    val = random.gauss(mu_, sigma_)
+                    # ensure non-negative
+                    s += max(0.0, val)
+                samples.append(s)
+            return sum(samples) / len(samples)
+
     time_cost = 0.0
     for r in routes:
-        # sum mu along route
-        for i in range(len(r) - 1):
-            a = r[i]
-            b = r[i + 1]
-            if mu_matrix is not None:
-                time_cost += mu_matrix[a, b]
-            else:
-                # fallback converting distance to time assuming 40 km/h
-                time_cost += dist[a, b] / 40.0
+        time_cost += route_expected_time(r)
 
     # Objective 2: variance of tour durations (T_k)
     Tks = []
@@ -293,19 +346,30 @@ def evaluate(solution, dist, customer_demands, weight_time=1.0, weight_balance=0
     total += penalty_unserved * duplicates
 
     # capacity violations: compare route loads to vehicle capacities (if provided)
-    vehicles = solution.get('vehicles', [])
+    vehicles = solution.get('vehicles', []) if vehicles is None else vehicles
     # helper: check if any vehicle can serve this route (capacity + energy)
     def route_feasible_by_fleet(route):
         load = sum(customer_demands.get(c, 0) for c in route if c != depot)
-        distance = route_distance(route, dist)
+        # energy feasibility considering recharging at stations
         for v in vehicles:
             cap = v.get('capacity', v.get('max_load_capacity', float('inf')))
             if load > cap:
                 continue
-            consumption = v.get('consumption', v.get('consumption_per_km', 0.2))
-            energy_needed = distance * consumption
             energy_cap = v.get('energy', v.get('max_energy_capacity', float('inf')))
-            if energy_needed <= energy_cap:
+            consumption = v.get('consumption', v.get('consumption_per_km', 0.2))
+            battery = energy_cap
+            feasible = True
+            for i in range(len(route) - 1):
+                a = route[i]
+                b = route[i + 1]
+                energy_needed = dist[a, b] * consumption
+                battery -= energy_needed
+                if 0 <= b < len(nodes) and nodes[b]['type'] == 'charging_station':
+                    battery = energy_cap
+                if battery < -1e-6:
+                    feasible = False
+                    break
+            if feasible:
                 return True
         return False
     for i, r in enumerate(routes):
@@ -374,7 +438,12 @@ class EVRPSolution:
             self.demands,
             weight_time=self.weight_time,
             weight_balance=self.weight_balance,
-            mu_matrix=self.mu_matrix,
+            mu_matrix=getattr(self, 'mu_matrix', None),
+            sigma_matrix=getattr(self, 'sigma_matrix', None),
+            monte_carlo=getattr(self, 'monte_carlo', False),
+            mc_samples=getattr(self, 'mc_samples', 50),
+            vehicles=self.solution.get('vehicles', None),
+            nodes=getattr(self, 'nodes_ref', None),
         )
 
 
@@ -403,8 +472,12 @@ def random_removal(state, rng, n_remove=2, **kwargs):
     # propagate mu and objective weights from current state
     try:
         new_state.mu_matrix = state.mu_matrix
+        new_state.sigma_matrix = getattr(state, 'sigma_matrix', None)
         new_state.weight_time = state.weight_time
         new_state.weight_balance = state.weight_balance
+        new_state.monte_carlo = getattr(state, 'monte_carlo', False)
+        new_state.mc_samples = getattr(state, 'mc_samples', 50)
+        new_state.nodes_ref = getattr(state, 'nodes_ref', None)
     except Exception:
         pass
     return new_state
@@ -451,8 +524,12 @@ def greedy_insertion(state, rng, **kwargs):
     new_state = EVRPSolution(new_sol, dist, demands)
     try:
         new_state.mu_matrix = state.mu_matrix
+        new_state.sigma_matrix = getattr(state, 'sigma_matrix', None)
         new_state.weight_time = state.weight_time
         new_state.weight_balance = state.weight_balance
+        new_state.monte_carlo = getattr(state, 'monte_carlo', False)
+        new_state.mc_samples = getattr(state, 'mc_samples', 50)
+        new_state.nodes_ref = getattr(state, 'nodes_ref', None)
     except Exception:
         pass
     return new_state
@@ -491,30 +568,38 @@ def swap_between_routes(state, rng, **kwargs):
     new_state = EVRPSolution(new_sol, state.dist, state.demands)
     try:
         new_state.mu_matrix = state.mu_matrix
+        new_state.sigma_matrix = getattr(state, 'sigma_matrix', None)
         new_state.weight_time = state.weight_time
         new_state.weight_balance = state.weight_balance
+        new_state.monte_carlo = getattr(state, 'monte_carlo', False)
+        new_state.mc_samples = getattr(state, 'mc_samples', 50)
+        new_state.nodes_ref = getattr(state, 'nodes_ref', None)
     except Exception:
         pass
     return new_state
 
 
 # --- 6. Run ALNS ---
-def run_alns(nodes, links, requests, fleet, drivers=None, iterations=200, weight_time=1.0, weight_balance=0.0):
-    dist, mu = build_distance_matrix(nodes, links)
+def run_alns(nodes, links, requests, fleet, drivers=None, iterations=200, weight_time=1.0, weight_balance=0.0, monte_carlo=False, mc_samples=50, sigma_alpha=0.2):
+    dist, mu, sigma = build_distance_matrix(nodes, links, sigma_alpha=sigma_alpha)
     sol0 = initial_solution(nodes, requests, fleet, dist, drivers=drivers)
     depot = next((n['id'] for n in nodes if n['type'] == 'depot'), 0)
     sol0['depot'] = depot
 
     demands = {r['node_id']: r['load'] for r in requests}
 
-    initial_cost = evaluate(sol0, dist, demands)
+    initial_cost = evaluate(sol0, dist, demands, mu_matrix=mu, sigma_matrix=sigma, monte_carlo=monte_carlo, mc_samples=mc_samples, vehicles=sol0.get('vehicles', []), nodes=nodes)
     print(f"Initial solution cost: {initial_cost:.2f}")
 
     initial_state = EVRPSolution(sol0, dist, demands)
-    # attach mu matrix and objective weights to the state so operators can propagate them
+    # attach mu/sigma matrices and objective weights to the state so operators can propagate them
     initial_state.mu_matrix = mu
+    initial_state.sigma_matrix = sigma
     initial_state.weight_time = weight_time
     initial_state.weight_balance = weight_balance
+    initial_state.monte_carlo = monte_carlo
+    initial_state.mc_samples = mc_samples
+    initial_state.nodes_ref = nodes
 
     alns = ALNS()
     # register operators (destroy then repair)

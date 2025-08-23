@@ -2,7 +2,7 @@ import math
 import sys
 from pathlib import Path
 
-from evrp_alns_solver import run_alns, save_solution
+from .evrp_alns_solver import run_alns, save_solution
 
 
 def parse_evrp_file(path):

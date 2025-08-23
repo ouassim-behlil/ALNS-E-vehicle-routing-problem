@@ -6,3 +6,5 @@ cache/*
 output/*
 __*
 *.evrp
+data/*
+model.*
