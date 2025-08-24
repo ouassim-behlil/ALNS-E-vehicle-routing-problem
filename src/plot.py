@@ -2,15 +2,46 @@ import argparse
 import os
 import matplotlib
 # use non-interactive backend when no DISPLAY
-if os.environ.get('DISPLAY','') == '':
+if os.environ.get('DISPLAY', '') == '':
     matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 import json
 
+# A clean style with larger fonts for report-ready figures
+plt.style.use('seaborn-v0_8-whitegrid')
+plt.rcParams.update(
+    {
+        "font.size": 12,
+        "axes.titlesize": 14,
+        "axes.labelsize": 12,
+        "legend.fontsize": 10,
+    }
+)
+
 
 def plot_sol(sol_path, out_path=None, show=False, figsize=(10, 8)):
-    with open(sol_path, 'r') as f:
+    """Plot a solution JSON file and save a high-quality image.
+
+    Parameters
+    ----------
+    sol_path : str
+        Path to the solution JSON file.
+    out_path : str, optional
+        File path for the generated image. If ``None`` an image with
+        ``_plot.png`` suffix is created next to ``sol_path``.
+    show : bool, optional
+        Display the figure interactively.
+    figsize : tuple, optional
+        Size of the figure in inches.
+
+    Returns
+    -------
+    str
+        The path to the saved image.
+    """
+
+    with open(sol_path, "r") as f:
         sol = json.load(f)
 
     routes = sol.get('routes', [])
@@ -51,17 +82,21 @@ def plot_sol(sol_path, out_path=None, show=False, figsize=(10, 8)):
     ax.set_title(f'Solution plot: {os.path.basename(sol_path)}')
     ax.set_xlabel('X')
     ax.set_ylabel('Y')
-    ax.legend(loc='best', fontsize='small')
-    ax.axis('equal')
+    ax.legend(loc="best")
+    ax.axis("equal")
     ax.grid(True, alpha=0.3)
 
     if out_path is None:
         out_path = os.path.splitext(sol_path)[0] + '_plot.png'
-    os.makedirs(os.path.dirname(out_path) or '.', exist_ok=True)
-    fig.savefig(out_path, dpi=200, bbox_inches='tight')
-    print(f'Saved plot to {out_path}')
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=300, bbox_inches="tight", facecolor="white")
+    print(f"Saved plot to {out_path}")
     if show:
         plt.show()
+    plt.close(fig)
+
+    return out_path
 
 
 def parse_file(path):
@@ -131,43 +166,70 @@ def parse_file(path):
 
 
 def plot_inst(evrp_path, out_path=None, show=False, figsize=(10, 8)):
+    """Plot the nodes of an EVRP instance and save as an image.
+
+    Parameters
+    ----------
+    evrp_path : str
+        Path to the ``.evrp`` instance file.
+    out_path : str, optional
+        File path for the generated image. If ``None`` an image with
+        ``_nodes.png`` suffix is created next to ``evrp_path``.
+    show : bool, optional
+        Display the figure interactively.
+    figsize : tuple, optional
+        Size of the figure in inches.
+
+    Returns
+    -------
+    str
+        The path to the saved image.
+    """
+
     file_ids, coord_map, stations, depot_ids = parse_file(evrp_path)
     if not file_ids:
-        raise ValueError(f'No nodes found in {evrp_path}')
+        raise ValueError(f"No nodes found in {evrp_path}")
     pts = np.array([coord_map[fid] for fid in file_ids])
 
     fig, ax = plt.subplots(figsize=figsize)
     # plot all nodes
-    ax.scatter(pts[:, 0], pts[:, 1], c='gray', s=30, label='Node')
+    ax.scatter(pts[:, 0], pts[:, 1], c="gray", s=30, label="Node")
     # annotate nodes with their original file ids
     for fid in file_ids:
         x, y = coord_map[fid]
-        ax.annotate(str(fid), (x, y), textcoords='offset points', xytext=(3, 3), fontsize=8)
+        ax.annotate(str(fid), (x, y), textcoords="offset points", xytext=(3, 3), fontsize=8)
     # plot stations
     for sid in stations:
         if sid in coord_map:
             x, y = coord_map[sid]
-            ax.scatter(x, y, c='blue', marker='P', s=120, label='Charging station' if 'Charging station' not in ax.get_legend_handles_labels()[1] else '')
+            station_label = None
+            if "Charging station" not in ax.get_legend_handles_labels()[1]:
+                station_label = "Charging station"
+            ax.scatter(x, y, c="blue", marker="P", s=120, label=station_label)
     # depot
     if depot_ids:
         did = depot_ids[0]
         if did in coord_map:
             x, y = coord_map[did]
-            ax.scatter(x, y, c='red', marker='*', s=200, label='Depot')
+            ax.scatter(x, y, c="red", marker="*", s=200, label="Depot")
 
-    ax.set_title(f'Instance nodes: {os.path.basename(evrp_path)}')
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.legend(loc='best', fontsize='small')
-    ax.axis('equal')
+    ax.set_title(f"Instance nodes: {os.path.basename(evrp_path)}")
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.legend(loc="best")
+    ax.axis("equal")
     ax.grid(True, alpha=0.3)
     if out_path is None:
-        out_path = os.path.splitext(evrp_path)[0] + '_nodes.png'
-    os.makedirs(os.path.dirname(out_path) or '.', exist_ok=True)
-    fig.savefig(out_path, dpi=200, bbox_inches='tight')
-    print(f'Saved instance plot to {out_path}')
+        out_path = os.path.splitext(evrp_path)[0] + "_nodes.png"
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=300, bbox_inches="tight", facecolor="white")
+    print(f"Saved instance plot to {out_path}")
     if show:
         plt.show()
+    plt.close(fig)
+
+    return out_path
 
 
 if __name__ == '__main__':
