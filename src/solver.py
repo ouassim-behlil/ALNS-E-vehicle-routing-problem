@@ -204,12 +204,26 @@ def _parse_evrp(path):
             travel_time = dist / 40.0
             links[(i, j)] = {'distance': float(dist), 'travel_time': float(travel_time)}
 
+    # ensure every customer node has a demand entry so that it will appear in
+    # the solution.  Some legacy EVRP instances omit zero-demand customers from
+    # the DEMAND_SECTION, which previously led to these nodes being ignored by
+    # the solver.
+    for fid in file_ids:
+        if fid in depot_ids or fid in stations:
+            continue
+        if demands.get(fid, 0) <= 0:
+            demands[fid] = 1
+
+    # build requests for all customer nodes (excluding depots and charging
+    # stations). Every customer gets at least a unit demand to ensure it is
+    # part of the returned solution.
     requests = []
-    for fid, d in demands.items():
-        if fid in id_to_idx:
-            idx = id_to_idx[fid]
-            if d > 0 and nodes[idx]['type'] != 'depot':
-                requests.append({'node_id': idx, 'load': int(d)})
+    for fid in file_ids:
+        if fid in depot_ids or fid in stations:
+            continue
+        idx = id_to_idx[fid]
+        load = int(demands.get(fid, 1))
+        requests.append({'node_id': idx, 'load': load})
 
     fleet = [{
         'type': 'ev_standard',
@@ -784,6 +798,9 @@ def solve(nodes, links, requests, fleet, drivers=None, iterations=200, weight_ti
     # Post-process: ensure all requests are assigned. Compute missing requested nodes by comparing
     # the set of requested node_ids to the nodes present in the solution routes (excluding depot).
     solution = best_state.solution
+    # Remove routes that do not visit any customer (e.g., [depot, depot]) to
+    # avoid reporting empty trips in the final solution.
+    solution['routes'] = [r for r in solution.get('routes', []) if len(r) > 2]
     depot = solution.get('depot', 0)
     all_requested = set(r['node_id'] for r in requests)
     assigned_nodes = set()
