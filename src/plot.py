@@ -23,6 +23,10 @@ plt.rcParams.update(
 def plot_sol(sol_path, out_path=None, show=False, figsize=(10, 8)):
     """Plot a solution JSON file and save a high-quality image.
 
+    The plot highlights each route in a different color and numbers
+    customer visits in the order they are served so the viewer can follow
+    the tour like a story.
+
     Parameters
     ----------
     sol_path : str
@@ -59,7 +63,7 @@ def plot_sol(sol_path, out_path=None, show=False, figsize=(10, 8)):
     fig, ax = plt.subplots(figsize=figsize)
     cmap = plt.get_cmap('tab10')
 
-    # plot each route
+    # plot each route with visit order annotations
     for i, route in enumerate(routes):
         if not route:
             continue
@@ -68,11 +72,21 @@ def plot_sol(sol_path, out_path=None, show=False, figsize=(10, 8)):
             continue
         pts = np.vstack(pts)
         color = cmap(i % 10)
-        ax.plot(pts[:, 0], pts[:, 1], '-', color=color, linewidth=2, alpha=0.8, label=f'Route {i+1}')
-        ax.scatter(pts[1:-1, 0] if len(pts) > 2 else [], pts[1:-1, 1] if len(pts) > 2 else [], c=[color], s=30)
+        ax.plot(pts[:, 0], pts[:, 1], '-', color=color, linewidth=2, alpha=0.8,
+                label=f'Route {i+1}')
+        # plot intermediate customer points
+        if len(pts) > 2:
+            ax.scatter(pts[1:-1, 0], pts[1:-1, 1], c=[color], s=30)
         # mark route start and end
         ax.scatter(pts[0, 0], pts[0, 1], c='k', marker='s', s=60, zorder=5)
         ax.scatter(pts[-1, 0], pts[-1, 1], c='k', marker='o', s=60, zorder=5)
+        # annotate step numbers to tell a story of the tour
+        for step, node in enumerate(route[1:-1], start=1):
+            nid = int(node)
+            if nid in coord_map:
+                x, y = coord_map[nid]
+                ax.annotate(str(step), (x, y), textcoords="offset points",
+                            xytext=(3, 3), fontsize=8, color=color)
 
     # plot depot
     if depot_id in coord_map:
