@@ -848,11 +848,20 @@ def main(argv=None):
     parser.add_argument('--iterations', type=int, default=400, help='ALNS iterations')
     parser.add_argument('--weight-time', type=float, default=1.0, help='Weight for expected travel time objective')
     parser.add_argument('--weight-balance', type=float, default=0.6, help='Weight for balance (variance) objective')
+    parser.add_argument('--solver', choices=['alns', 'ortools'], default='alns',
+                        help='Choose solving backend')
     args = parser.parse_args(argv)
 
     inst = args.instance
     nodes, links, requests, fleet, drivers = parse_instance(inst)
-    solution, cost = solve(nodes, links, requests, fleet, drivers=drivers, iterations=args.iterations, weight_time=args.weight_time, weight_balance=args.weight_balance)
+    if args.solver == 'ortools':
+        from ortools_solver import solve_ortools
+        solution, cost = solve_ortools(nodes, links, requests, fleet)
+    else:
+        solution, cost = solve(nodes, links, requests, fleet, drivers=drivers,
+                               iterations=args.iterations,
+                               weight_time=args.weight_time,
+                               weight_balance=args.weight_balance)
     dist, _, _ = build_mats(nodes, links)
     print_solution(solution, dist)
     save(solution, nodes, filename='output/solution.json')
