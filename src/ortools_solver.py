@@ -81,29 +81,10 @@ def solve_ortools(nodes, links, requests, fleet):
         demand_cb, 0, load_caps, True, 'load')
 
     # Energy dimension (battery)
-    # For simplicity, assume uniform consumption across vehicles
-    consumption = vehicles[0]['consumption'] if vehicles else 0.0
-    energy_caps = [int(v['energy']) for v in vehicles]
-    energy_cost = dist * consumption
-
-    def energy_callback(from_index, to_index):
-        i = manager.IndexToNode(from_index)
-        j = manager.IndexToNode(to_index)
-        base = energy_cost[i, j]
-        # Visiting a charging station or depot resets battery.
-        if nodes[j]['type'] in ('charging_station', 'depot'):
-            base -= energy_caps[0]
-        return int(base * 1000)
-
-    energy_cb = routing.RegisterTransitCallback(energy_callback)
-    routing.AddDimensionWithVehicleCapacity(
-        energy_cb, 0, energy_caps, True, 'energy')
-
-    energy_dim = routing.GetDimensionOrDie('energy')
-    for idx, ndata in enumerate(nodes):
-        if ndata['type'] in ('charging_station', 'depot'):
-            node_index = manager.NodeToIndex(idx)
-            energy_dim.CumulVar(node_index).SetRange(0, 0)
+    # The OR-Tools baseline does not model battery constraints. Vehicles are
+    # assumed to have sufficient energy for their routes. A more accurate
+    # formulation would require a state-dependent dimension or additional
+    # variables to reset the battery at charging stations.
 
     # Search parameters
     search_params = pywrapcp.DefaultRoutingSearchParameters()
