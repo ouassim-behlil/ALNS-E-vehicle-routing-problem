@@ -1,12 +1,18 @@
 import argparse
 import time
+import os
+import sys
 from pathlib import Path
 from typing import List, Dict
-
-from .file_solver import build_problem
-from .solver import solve as solve_alns, build_mats, route_dist
-from .ga_solver import solve_ga
-from .ortools_solver import solve_ortools
+#from .file_solver import build_problem
+if __package__:
+    from .file_solver import build_problem
+else:  # pragma: no cover - runtime path fix
+    sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+    from src.file_solver import build_problem
+    from src.ga_solver import solve_ga
+    from src.ortools_solver import solve_ortools
+from solver import solve as solve_alns, build_mats, route_dist
 
 
 def _solution_cost(solution: Dict, dist) -> float:
@@ -64,7 +70,7 @@ def main():
     parser.add_argument("--data-dir", default="data", help="Directory containing .evrp files")
     parser.add_argument("--solvers", default="alns,ortools,ga",
                         help="Comma-separated list of solvers to run")
-    parser.add_argument("--iterations", type=int, default=50,
+    parser.add_argument("--iterations", type=int, default=400,
                         help="Iterations for ALNS and GA solvers")
     parser.add_argument("--limit", type=int, help="Limit number of instances")
     args = parser.parse_args()
