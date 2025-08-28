@@ -803,14 +803,15 @@ def solve(nodes, links, requests, fleet, drivers=None, iterations=200, weight_ti
     return solution, best_cost
 
 
-def print_solution(solution, dist):
-    print("\nSolution routes:")
+def print_solution(solution, dist, prefix=""):
+    """Pretty-print solution routes with optional solver prefix."""
+    print(f"\n{prefix}Solution routes:")
     for i, r in enumerate(solution['routes']):
         d = route_dist(r, dist)
-        print(f" Route {i+1}: {r}  distance={d:.2f}")
+        print(f"{prefix} Route {i+1}: {r}  distance={d:.2f}")
 
 
-def save(solution, nodes, filename='output/solution.json'):
+def save(solution, nodes, filename='output/solution.json', prefix=""):
     import json
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     # map node id -> lat/lon
@@ -836,35 +837,51 @@ def save(solution, nodes, filename='output/solution.json'):
         out['vehicles'] = solution['vehicles']
     with open(filename, 'w', encoding='utf-8') as f:
         json.dump(out, f, indent=2)
-    print(f"Saved solution to {filename}")
+    print(f"{prefix} Saved solution to {filename}")
 
 
 def main(argv=None):
     import argparse
 
-    parser = argparse.ArgumentParser(description='Run ALNS EVRP solver')
+    parser = argparse.ArgumentParser(description='Run EVRP solver')
     parser.add_argument('--instance', default='evrp_rabat_data.xml',
                         help='Input EVRP instance file (.xml or .evrp)')
-    parser.add_argument('--iterations', type=int, default=400, help='ALNS iterations')
-    parser.add_argument('--weight-time', type=float, default=1.0, help='Weight for expected travel time objective')
-    parser.add_argument('--weight-balance', type=float, default=0.6, help='Weight for balance (variance) objective')
-    parser.add_argument('--solver', choices=['alns', 'ortools'], default='alns',
-                        help='Choose solving backend')
+    parser.add_argument('--iterations', type=int, default=400,
+                        help='ALNS/GA iterations')
+    parser.add_argument('--weight-time', type=float, default=1.0,
+                        help='Weight for expected travel time objective')
+    parser.add_argument('--weight-balance', type=float, default=0.6,
+                        help='Weight for balance (variance) objective')
+    parser.add_argument('--solver', default='alns',
+                        help='Comma-separated list of solving backends to run '
+                             "(alns, ortools, ga) or 'all'")
     args = parser.parse_args(argv)
 
     inst = args.instance
     nodes, links, requests, fleet, drivers = parse_instance(inst)
-    if args.solver == 'ortools':
-        from ortools_solver import solve_ortools
-        solution, cost = solve_ortools(nodes, links, requests, fleet)
-    else:
-        solution, cost = solve(nodes, links, requests, fleet, drivers=drivers,
-                               iterations=args.iterations,
-                               weight_time=args.weight_time,
-                               weight_balance=args.weight_balance)
+    # parse solver list
+    chosen = [s.strip().lower() for s in args.solver.split(',') if s.strip()]
+    if 'all' in chosen:
+        chosen = ['alns', 'ortools', 'ga']
+
     dist, _, _ = build_mats(nodes, links)
-    print_solution(solution, dist)
-    save(solution, nodes, filename='output/solution.json')
+    for sname in chosen:
+        if sname == 'ortools':
+            from ortools_solver import solve_ortools
+            solution, cost = solve_ortools(nodes, links, requests, fleet)
+        elif sname == 'ga':
+            from ga_solver import solve_ga
+            solution, cost = solve_ga(nodes, links, requests, fleet,
+                                     generations=args.iterations)
+        else:
+            solution, cost = solve(nodes, links, requests, fleet, drivers=drivers,
+                                   iterations=args.iterations,
+                                   weight_time=args.weight_time,
+                                   weight_balance=args.weight_balance)
+        prefix = f"[{sname.upper()}]"
+        print(prefix, f"Total cost: {cost:.2f}")
+        print_solution(solution, dist, prefix=prefix)
+        save(solution, nodes, filename=f'output/solution_{sname}.json', prefix=prefix)
 
 
 if __name__ == '__main__':
