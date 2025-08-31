@@ -48,12 +48,8 @@ def _parse_xml(xml_path):
             'load': int(req.find('requested_load').text)
         })
 
-    # Ensure every customer node has a request (default load=1) -- requirement: all customers must be visited
-    customer_ids = [n['id'] for n in nodes if n['type'] == 'customer']
-    existing = set(r['node_id'] for r in requests)
-    for cid in customer_ids:
-        if cid not in existing:
-            requests.append({'node_id': cid, 'load': 1})
+    # Only nodes with explicit positive demand are required; do not add
+    # implicit requests for zero-demand customers.
 
     fleet = []
     for v in root.find('fleet'):
@@ -204,26 +200,15 @@ def _parse_evrp(path):
             travel_time = dist / 40.0
             links[(i, j)] = {'distance': float(dist), 'travel_time': float(travel_time)}
 
-    # ensure every customer node has a demand entry so that it will appear in
-    # the solution.  Some legacy EVRP instances omit zero-demand customers from
-    # the DEMAND_SECTION, which previously led to these nodes being ignored by
-    # the solver.
-    for fid in file_ids:
-        if fid in depot_ids or fid in stations:
-            continue
-        if demands.get(fid, 0) <= 0:
-            demands[fid] = 1
-
-    # build requests for all customer nodes (excluding depots and charging
-    # stations). Every customer gets at least a unit demand to ensure it is
-    # part of the returned solution.
+    # Build requests only for customer nodes with demand > 0
     requests = []
     for fid in file_ids:
         if fid in depot_ids or fid in stations:
             continue
-        idx = id_to_idx[fid]
-        load = int(demands.get(fid, 1))
-        requests.append({'node_id': idx, 'load': load})
+        load = int(demands.get(fid, 0))
+        if load > 0:
+            idx = id_to_idx[fid]
+            requests.append({'node_id': idx, 'load': load})
 
     fleet = [{
         'type': 'ev_standard',
@@ -237,7 +222,7 @@ def _parse_evrp(path):
     return nodes, links, requests, fleet, drivers
 
 
-def parse_instance(path):
+def parse_instance_file(path):
     """Parse an EVRP instance from either XML or .evrp format."""
     if path.lower().endswith('.evrp'):
         return _parse_evrp(path)
@@ -245,7 +230,7 @@ def parse_instance(path):
 
 
 # --- 2. Build distance matrix ---
-def build_mats(nodes, links, sigma_alpha=0.2):
+def build_matrices(nodes, links, sigma_alpha=0.2):
     """Build distance, expected travel time (mu) and sigma matrices.
 
     sigma_alpha: fallback relative stddev: sigma = alpha * mu when explicit sigma missing.
@@ -291,7 +276,7 @@ def build_mats(nodes, links, sigma_alpha=0.2):
 
 
 # --- 3. Simple initial solution (greedy capacity-respecting) ---
-def init_solution(nodes, requests, fleet, dist, drivers=None):
+def build_initial_solution(nodes, requests, fleet, dist, drivers=None):
     depot_id = next((n['id'] for n in nodes if n['type'] == 'depot'), 0)
     customer_demands = {r['node_id']: r['load'] for r in requests}
     customers = list(customer_demands.keys())
@@ -384,7 +369,7 @@ def init_solution(nodes, requests, fleet, dist, drivers=None):
 
 
 # --- 4. Objective and helpers ---
-def route_dist(route, dist):
+def compute_route_distance(route, dist):
     d = 0.0
     for i in range(len(route) - 1):
         a = route[i]
@@ -393,7 +378,7 @@ def route_dist(route, dist):
     return d
 
 
-def assign_drivers(routes, drivers, dist, mu_matrix=None):
+def assign_drivers_to_routes(routes, drivers, dist, mu_matrix=None):
     """Assign drivers to routes trying to balance total route durations (LPT heuristic).
 
     Returns a dict mapping route_index -> driver_id and a dict driver_id -> total_time_hours
@@ -430,7 +415,7 @@ def assign_drivers(routes, drivers, dist, mu_matrix=None):
 
     return assignments, driver_loads
 
-def score(solution, dist, customer_demands, weight_time=1.0, weight_balance=0.0, mu_matrix=None, sigma_matrix=None, monte_carlo=False, mc_samples=50, penalty_unserved=1e5, vehicles=None, nodes=None):
+def evaluate_solution(solution, dist, customer_demands, weight_time=1.0, weight_balance=0.0, mu_matrix=None, sigma_matrix=None, monte_carlo=False, mc_samples=50, penalty_unserved=1e5, vehicles=None, nodes=None):
     total = 0.0
     routes = solution.get('routes', [])
     unassigned = set(solution.get('unassigned', []))
@@ -552,11 +537,11 @@ def score(solution, dist, customer_demands, weight_time=1.0, weight_balance=0.0,
     if drivers is not None:
         if not driver_assignments:
             # compute assignments
-            assignments, driver_loads = assign_drivers(routes, drivers, dist, mu_matrix)
+            assignments, driver_loads = assign_drivers_to_routes(routes, drivers, dist, mu_matrix)
         else:
             assignments = driver_assignments
             # compute loads
-            _, driver_loads = assign_drivers(routes, drivers, dist, mu_matrix)
+            _, driver_loads = assign_drivers_to_routes(routes, drivers, dist, mu_matrix)
 
         # penalty for drivers exceeding their shift_hours
         for d in drivers:
@@ -593,7 +578,7 @@ class Solution:
         self.weight_balance = 0.0
 
     def objective(self) -> float:
-        return score(
+        return evaluate_solution(
             self.solution,
             self.dist,
             self.demands,
@@ -608,7 +593,7 @@ class Solution:
         )
 
 
-def remove_random(state, rng, n_remove=2, **kwargs):
+def destroy_remove_random(state, rng, n_remove=2, **kwargs):
     sol = state.solution
     depot = sol.get('depot', 0)
     all_customers = [c for r in sol['routes'] for c in r if c != depot]
@@ -626,7 +611,7 @@ def remove_random(state, rng, n_remove=2, **kwargs):
     new_sol['unassigned'] = list(new_unassigned)
     # recompute driver assignments if drivers present
     if new_sol.get('drivers'):
-        assigns, loads = assign_drivers(new_sol['routes'], new_sol['drivers'], state.dist, state.mu_matrix if hasattr(state, 'mu_matrix') else None)
+        assigns, loads = assign_drivers_to_routes(new_sol['routes'], new_sol['drivers'], state.dist, state.mu_matrix if hasattr(state, 'mu_matrix') else None)
         new_sol['driver_assignments'] = assigns
 
     new_state = Solution(new_sol, state.dist, state.demands)
@@ -644,7 +629,7 @@ def remove_random(state, rng, n_remove=2, **kwargs):
     return new_state
 
 
-def insert_greedy(state, rng, **kwargs):
+def repair_insert_greedy(state, rng, **kwargs):
     sol = state.solution
     dist = state.dist
     demands = state.demands
@@ -666,7 +651,7 @@ def insert_greedy(state, rng, **kwargs):
                 continue
             for pos in range(1, len(r)):
                 r_copy = r[:pos] + [cust] + r[pos:]
-                cost = route_dist(r_copy, dist) - route_dist(r, dist)
+                cost = compute_route_distance(r_copy, dist) - compute_route_distance(r, dist)
                 if cost < best_cost:
                     best_cost = cost
                     best = (i, pos)
@@ -679,7 +664,7 @@ def insert_greedy(state, rng, **kwargs):
     new_sol['unassigned'] = []
     # recompute driver assignments if drivers info present
     if new_sol.get('drivers'):
-        assigns, loads = assign_drivers(new_sol['routes'], new_sol['drivers'], dist, state.mu_matrix if hasattr(state, 'mu_matrix') else None)
+        assigns, loads = assign_drivers_to_routes(new_sol['routes'], new_sol['drivers'], dist, state.mu_matrix if hasattr(state, 'mu_matrix') else None)
         new_sol['driver_assignments'] = assigns
 
     new_state = Solution(new_sol, dist, demands)
@@ -696,7 +681,7 @@ def insert_greedy(state, rng, **kwargs):
     return new_state
 
 
-def swap_routes(state, rng, **kwargs):
+def repair_swap_routes(state, rng, **kwargs):
     sol = state.solution
     depot = sol.get('depot', 0)
     new_sol = copy.deepcopy(sol)
@@ -723,7 +708,7 @@ def swap_routes(state, rng, **kwargs):
                 r[idx] = c1
     # recompute driver assignments if drivers present
     if new_sol.get('drivers'):
-        assigns, loads = assign_drivers(new_sol['routes'], new_sol['drivers'], state.dist, state.mu_matrix if hasattr(state, 'mu_matrix') else None)
+        assigns, loads = assign_drivers_to_routes(new_sol['routes'], new_sol['drivers'], state.dist, state.mu_matrix if hasattr(state, 'mu_matrix') else None)
         new_sol['driver_assignments'] = assigns
 
     new_state = Solution(new_sol, state.dist, state.demands)
@@ -741,15 +726,15 @@ def swap_routes(state, rng, **kwargs):
 
 
 # --- 6. Run ALNS ---
-def solve(nodes, links, requests, fleet, drivers=None, iterations=200, weight_time=1.0, weight_balance=0.0, monte_carlo=False, mc_samples=50, sigma_alpha=0.2):
-    dist, mu, sigma = build_mats(nodes, links, sigma_alpha=sigma_alpha)
-    sol0 = init_solution(nodes, requests, fleet, dist, drivers=drivers)
+def solve_alns(nodes, links, requests, fleet, drivers=None, iterations=200, weight_time=1.0, weight_balance=0.0, monte_carlo=False, mc_samples=50, sigma_alpha=0.2):
+    dist, mu, sigma = build_matrices(nodes, links, sigma_alpha=sigma_alpha)
+    sol0 = build_initial_solution(nodes, requests, fleet, dist, drivers=drivers)
     depot = next((n['id'] for n in nodes if n['type'] == 'depot'), 0)
     sol0['depot'] = depot
 
     demands = {r['node_id']: r['load'] for r in requests}
 
-    initial_cost = score(sol0, dist, demands, mu_matrix=mu, sigma_matrix=sigma, monte_carlo=monte_carlo, mc_samples=mc_samples, vehicles=sol0.get('vehicles', []), nodes=nodes)
+    initial_cost = evaluate_solution(sol0, dist, demands, mu_matrix=mu, sigma_matrix=sigma, monte_carlo=monte_carlo, mc_samples=mc_samples, vehicles=sol0.get('vehicles', []), nodes=nodes)
     print(f"Initial solution cost: {initial_cost:.2f}")
 
     initial_state = Solution(sol0, dist, demands)
@@ -764,14 +749,14 @@ def solve(nodes, links, requests, fleet, drivers=None, iterations=200, weight_ti
 
     alns = ALNS()
     # register operators (destroy then repair)
-    alns.add_destroy_operator(remove_random, name='rand_rem_2')
+    alns.add_destroy_operator(destroy_remove_random, name='rand_rem_2')
     # register another destroy with larger removal via a small wrapper
     def rand_rem_4(state, rng, **kwargs):
-        return remove_random(state, rng, n_remove=4)
+        return destroy_remove_random(state, rng, n_remove=4)
 
     alns.add_destroy_operator(rand_rem_4, name='rand_rem_4')
-    alns.add_repair_operator(insert_greedy, name='greedy_insert')
-    alns.add_repair_operator(swap_routes, name='swap')
+    alns.add_repair_operator(repair_insert_greedy, name='greedy_insert')
+    alns.add_repair_operator(repair_swap_routes, name='swap')
 
     # Create SA acceptor. autofit can produce start_temp < end_temp for small initial_cost;
     # instantiate a safe SA with start temp scaled from initial cost instead.
@@ -811,24 +796,63 @@ def solve(nodes, links, requests, fleet, drivers=None, iterations=200, weight_ti
 
     missing = sorted(list(all_requested - assigned_nodes))
     if missing:
-        print(f"Post-processing: {len(missing)} missing requested nodes will be assigned as single-customer routes...")
+        from .constraints import insert_charging_stations, check_route_feasibility
+        print(f"Post-processing: {len(missing)} missing requested nodes will be inserted into existing routes with charging support if needed...")
+        vehicles_local = solution.get('vehicles', [])
         for cust in missing:
-            solution.setdefault('routes', []).append([depot, int(cust), depot])
-    # ensure unassigned is empty after postprocessing
-    solution['unassigned'] = []
+            best = None
+            best_delta = float('inf')
+            # try to insert into any existing route position
+            for ri, r in enumerate(solution.setdefault('routes', [])):
+                for pos in range(1, len(r)):
+                    trial = r[:pos] + [int(cust)] + r[pos:]
+                    fixed = insert_charging_stations(trial, vehicles_local, dist, nodes, {r['node_id']: r['load'] for r in requests})
+                    if fixed is None:
+                        continue
+                    if not check_route_feasibility(fixed, vehicles_local, dist, nodes, {r['node_id']: r['load'] for r in requests}):
+                        continue
+                    delta = compute_route_distance(fixed, dist) - compute_route_distance(r, dist)
+                    if delta < best_delta:
+                        best_delta = delta
+                        best = (ri, fixed)
+            if best is not None:
+                ri, fixed = best
+                solution['routes'][ri] = fixed
+            else:
+                # fall back to new route; charging stations will be inserted during feasibility enforcement
+                solution.setdefault('routes', []).append([depot, int(cust), depot])
+    # enforce common feasibility constraints and recompute a distance-based cost for consistency
+    # import feasibility enforcement in both package and script contexts
+    try:
+        from .constraints import enforce_solution_feasibility
+    except Exception:  # pragma: no cover - runtime path fix
+        import os as _os, sys as _sys
+        _sys.path.append(_os.path.dirname(_os.path.dirname(__file__)))
+        from evrp.constraints import enforce_solution_feasibility
+    demands_map = {r['node_id']: r['load'] for r in requests}
+    solution = enforce_solution_feasibility(solution, nodes, dist, demands_map)
+    # ensure unassigned reflects enforcement
+    if 'unassigned' not in solution:
+        solution['unassigned'] = []
 
-    return solution, best_cost
+    # recompute distance cost of final routes for reporting parity with other solvers
+    final_cost = 0.0
+    for r in solution.get('routes', []):
+        for i in range(len(r) - 1):
+            final_cost += dist[r[i], r[i + 1]]
+
+    return solution, final_cost
 
 
-def print_solution(solution, dist, prefix=""):
+def print_routes(solution, dist, prefix=""):
     """Pretty-print solution routes with optional solver prefix."""
     print(f"\n{prefix}Solution routes:")
     for i, r in enumerate(solution['routes']):
-        d = route_dist(r, dist)
+        d = compute_route_distance(r, dist)
         print(f"{prefix} Route {i+1}: {r}  distance={d:.2f}")
 
 
-def save(solution, nodes, filename='output/solution.json', prefix=""):
+def save_solution(solution, nodes, filename='output/solution.json', prefix=""):
     import json
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     # map node id -> lat/lon
@@ -875,30 +899,30 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     inst = args.instance
-    nodes, links, requests, fleet, drivers = parse_instance(inst)
+    nodes, links, requests, fleet, drivers = parse_instance_file(inst)
     # parse solver list
     chosen = [s.strip().lower() for s in args.solver.split(',') if s.strip()]
     if 'all' in chosen:
         chosen = ['alns', 'ortools', 'ga']
 
-    dist, _, _ = build_mats(nodes, links)
+    dist, _, _ = build_matrices(nodes, links)
     for sname in chosen:
         if sname == 'ortools':
-            from ortools_solver import solve_ortools
+            from .ortools_solver import solve_ortools
             solution, cost = solve_ortools(nodes, links, requests, fleet)
         elif sname == 'ga':
-            from ga_solver import solve_ga
+            from .ga_solver import solve_ga
             solution, cost = solve_ga(nodes, links, requests, fleet,
                                      generations=args.iterations)
         else:
-            solution, cost = solve(nodes, links, requests, fleet, drivers=drivers,
+            solution, cost = solve_alns(nodes, links, requests, fleet, drivers=drivers,
                                    iterations=args.iterations,
                                    weight_time=args.weight_time,
                                    weight_balance=args.weight_balance)
         prefix = f"[{sname.upper()}]"
         print(prefix, f"Total cost: {cost:.2f}")
-        print_solution(solution, dist, prefix=prefix)
-        save(solution, nodes, filename=f'output/solution_{sname}.json', prefix=prefix)
+        print_routes(solution, dist, prefix=prefix)
+        save_solution(solution, nodes, filename=f'output/solution_{sname}.json', prefix=prefix)
 
 
 if __name__ == '__main__':

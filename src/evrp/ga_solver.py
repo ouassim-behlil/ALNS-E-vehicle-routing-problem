@@ -2,38 +2,29 @@ import random
 from typing import List, Dict, Tuple, Optional
 
 import numpy as np
+import os
+import sys
+if __package__:
+    from .constraints import (
+        enforce_solution_feasibility,
+        build_distance_matrix,
+        expand_vehicle_fleet,
+    )
+else:  # pragma: no cover - runtime path fix
+    sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+    from evrp.constraints import (
+        enforce_solution_feasibility,
+        build_distance_matrix,
+        expand_vehicle_fleet,
+    )
 
 
 def _expand_fleet(fleet: List[Dict]) -> List[Dict]:
-    """Expand fleet definitions into individual vehicles."""
-    vehicles = []
-    for v in fleet:
-        qty = int(v.get("quantity", 1))
-        for _ in range(qty):
-            vehicles.append(
-                {
-                    "capacity": float(v.get("max_load_capacity", 0)),
-                    "energy": float(v.get("max_energy_capacity", 0)),
-                    "consumption": float(v.get("consumption_per_km", 0.0)),
-                }
-            )
-    if not vehicles:
-        vehicles.append({"capacity": 0.0, "energy": 0.0, "consumption": 0.0})
-    return vehicles
+    return expand_vehicle_fleet(fleet)
 
 
 def _distance_matrix(n: int, links: Dict[Tuple[int, int], Dict]) -> np.ndarray:
-    """Build dense distance matrix from links mapping."""
-    big = 1e9
-    dist = np.full((n, n), big, dtype=float)
-    for i in range(n):
-        dist[i, i] = 0.0
-    for (i, j), data in links.items():
-        d = data["distance"] if isinstance(data, dict) else float(data)
-        dist[i, j] = d
-        if dist[j, i] >= big:
-            dist[j, i] = d
-    return dist
+    return build_distance_matrix(n, links)
 
 
 def _build_routes(
@@ -166,10 +157,50 @@ def solve_ga(
         best_routes = []
     if best_unassigned is None:
         best_unassigned = customers
+    # Post-process to ensure every requested customer appears in routes.
+    # Prefer inserting missing customers into existing routes, adding charging
+    # stations if needed. Fall back to opening a new route if no placement works.
+    if best_unassigned:
+        try:
+            from .constraints import insert_charging_stations, check_route_feasibility
+        except Exception:
+            from evrp.constraints import insert_charging_stations, check_route_feasibility
+        dem_map = demand
+        remaining = []
+        for cust in best_unassigned:
+            placed = False
+            for ri, r in enumerate(best_routes):
+                found = False
+                for pos in range(1, len(r)):
+                    trial = r[:pos] + [int(cust)] + r[pos:]
+                    fixed = insert_charging_stations(trial, vehicles, dist, nodes, dem_map)
+                    if fixed is None:
+                        continue
+                    if not check_route_feasibility(fixed, vehicles, dist, nodes, dem_map):
+                        continue
+                    best_routes[ri] = fixed
+                    found = True
+                    placed = True
+                    break
+                if found:
+                    break
+            if not placed:
+                remaining.append(int(cust))
+        for cust in remaining:
+            best_routes.append([depot, int(cust), depot])
+        best_unassigned = []
     solution = {
         "routes": best_routes,
         "unassigned": best_unassigned,
         "vehicles": vehicles,
         "depot": depot,
     }
-    return solution, best_cost
+    # Enforce common feasibility checks
+    demands = {r["node_id"]: int(r.get("load", 0)) for r in requests}
+    solution = enforce_solution_feasibility(solution, nodes, dist, demands)
+    # recompute cost as distance after enforcement
+    cost = 0.0
+    for r in solution.get("routes", []):
+        for i in range(len(r) - 1):
+            cost += dist[r[i], r[i + 1]]
+    return solution, cost

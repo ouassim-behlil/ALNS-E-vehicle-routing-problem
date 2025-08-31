@@ -19,10 +19,10 @@ from typing import Dict, Any
 
 # Enable execution both as part of the ``src`` package and as a standalone script
 if __package__:
-    from .solver import build_mats, score
+    from .alns_solver import build_matrices, evaluate_solution
 else:  # pragma: no cover - runtime path fix
     sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-    from src.solver import build_mats, score
+    from evrp.alns_solver import build_matrices, evaluate_solution
 
 
 def robustness_analysis(
@@ -44,7 +44,7 @@ def robustness_analysis(
     """
 
     base_demands = {r['node_id']: r['load'] for r in requests}
-    dist_base, mu_base, _ = build_mats(nodes, links)
+    dist_base, mu_base, _ = build_matrices(nodes, links)
 
     costs = []
     infeasible_count = 0
@@ -63,7 +63,7 @@ def robustness_analysis(
             noise = random.gauss(0.0, travel_time_std)
             mu_mat[i, j] = mu_base[i, j] * max(0.0, 1.0 + noise)
 
-        c = score(
+        c = evaluate_solution(
             solution,
             dist_base,
             demands,
@@ -112,10 +112,10 @@ def sensitivity_analysis(
     """
 
     base_demands = {r['node_id']: r['load'] for r in requests}
-    dist_base, mu_base, _ = build_mats(nodes, links)
+    dist_base, mu_base, _ = build_matrices(nodes, links)
     penalty = 1e5
 
-    base_cost = score(
+    base_cost = evaluate_solution(
         solution,
         dist_base,
         base_demands,
@@ -140,7 +140,7 @@ def sensitivity_analysis(
                     noise = random.gauss(0.0, travel_time_std)
                     mu_mat[i, j] = mu_base[i, j] * max(0.0, 1.0 + noise)
 
-            c = score(
+            c = evaluate_solution(
                 solution,
                 dist_base,
                 demands,
@@ -166,11 +166,11 @@ def main(argv=None):
     """Simple CLI for robustness and sensitivity analysis."""
     import argparse
     if __package__:
-        from .file_solver import build_problem
-        from .solver import solve
+        from .problem_io import build_problem_from_evrp
+        from .alns_solver import solve_alns
     else:  # pragma: no cover - runtime path fix
-        from src.file_solver import build_problem
-        from src.solver import solve
+        from evrp.problem_io import build_problem_from_evrp
+        from evrp.alns_solver import solve_alns
 
     parser = argparse.ArgumentParser(
         description="Robustness analysis for EVRP solutions"
@@ -199,8 +199,8 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
 
-    nodes, links, requests, fleet = build_problem(args.instance)
-    solution, _ = solve(
+    nodes, links, requests, fleet = build_problem_from_evrp(args.instance)
+    solution, _ = solve_alns(
         nodes, links, requests, fleet, iterations=args.iterations
     )
 

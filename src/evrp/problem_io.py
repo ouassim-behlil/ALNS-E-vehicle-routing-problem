@@ -2,10 +2,10 @@ import math
 import sys
 from pathlib import Path
 
-from .solver import solve, save
+"""EVRP file parsing and single-file solve CLI."""
 
 
-def parse_file(path):
+def parse_evrp_file(path):
     header = {}
     node_coords = {}
     demands = {}
@@ -96,8 +96,8 @@ def parse_file(path):
     return header, node_coords, demands, stations, depot_ids
 
 
-def build_problem(path):
-    header, node_coords, demands, stations, depot_ids = parse_file(path)
+def build_problem_from_evrp(path):
+    header, node_coords, demands, stations, depot_ids = parse_evrp_file(path)
 
     dim = int(header.get('DIMENSION', len(node_coords)))
     vehicles = int(header.get('VEHICLES', 1))
@@ -133,12 +133,12 @@ def build_problem(path):
             travel_time = dist / 40.0
             links[(i, j)] = {'distance': float(dist), 'travel_time': float(travel_time)}
 
-    # requests: include only demands strictly greater than zero and exclude depot nodes
+    # requests: include only customers (exclude depot/stations) with demand > 0
     requests = []
     for fid, d in demands.items():
         if fid in id_to_idx:
             idx = id_to_idx[fid]
-            if d > 0 and nodes[idx]['type'] != 'depot':
+            if d > 0 and nodes[idx]['type'] != 'depot' and nodes[idx]['type'] != 'charging_station':
                 requests.append({'node_id': idx, 'load': int(d)})
 
     # fleet: single vehicle type using headers
@@ -167,16 +167,18 @@ def main(argv=None):
         print(f'Instance not found: {inst}')
         sys.exit(1)
 
-    nodes, links, requests, fleet = build_problem(str(inst))
+    nodes, links, requests, fleet = build_problem_from_evrp(str(inst))
 
     print(f'Parsed instance: nodes={len(nodes)} requests={len(requests)} fleet_types={len(fleet)}')
 
     # run ALNS
-    solution, cost = solve(nodes, links, requests, fleet, drivers=None, iterations=args.iterations)
+    # Import solver lazily to avoid importing heavy deps on module import
+    from .alns_solver import solve_alns, save_solution
+    solution, cost = solve_alns(nodes, links, requests, fleet, drivers=None, iterations=args.iterations)
     print(f'Finished. cost={cost:.2f}')
 
     # save solution
-    save(solution, nodes, filename=args.output)
+    save_solution(solution, nodes, filename=args.output)
 
 
 if __name__ == '__main__':

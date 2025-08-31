@@ -4,38 +4,40 @@ import os
 import sys
 from pathlib import Path
 from typing import List, Dict
-#from .file_solver import build_problem
+# Flexible imports: work as package or standalone script
 if __package__:
-    from .file_solver import build_problem
+    from .problem_io import build_problem_from_evrp
+    from .alns_solver import build_matrices, compute_route_distance
 else:  # pragma: no cover - runtime path fix
     sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-    from src.file_solver import build_problem
-    from src.ga_solver import solve_ga
-    from src.ortools_solver import solve_ortools
-from solver import solve as solve_alns, build_mats, route_dist
+    from evrp.problem_io import build_problem_from_evrp
+    from evrp.alns_solver import build_matrices, compute_route_distance
 
 
 def _solution_cost(solution: Dict, dist) -> float:
     """Compute total distance of all routes in solution using distance matrix."""
     total = 0.0
     for route in solution.get("routes", []):
-        total += route_dist(route, dist)
+        total += compute_route_distance(route, dist)
     return total
 
 
 def run_instance(path: Path, solvers: List[str], iterations: int) -> List[Dict]:
     """Run selected solvers on a single instance file and return metrics."""
-    nodes, links, requests, fleet = build_problem(str(path))
-    dist, _, _ = build_mats(nodes, links)
+    nodes, links, requests, fleet = build_problem_from_evrp(str(path))
+    dist, _, _ = build_matrices(nodes, links)
 
     results = []
     for name in solvers:
         start = time.perf_counter()
         if name == "alns":
+            from .alns_solver import solve_alns  # lazy import
             sol, _ = solve_alns(nodes, links, requests, fleet, iterations=iterations)
         elif name == "ga":
+            from .ga_solver import solve_ga  # lazy import
             sol, _ = solve_ga(nodes, links, requests, fleet, generations=iterations)
         elif name == "ortools":
+            from .ortools_solver import solve_ortools  # lazy import
             sol, _ = solve_ortools(nodes, links, requests, fleet)
         else:
             continue

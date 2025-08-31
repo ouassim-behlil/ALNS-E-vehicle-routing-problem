@@ -126,7 +126,8 @@ def parse_file(path):
         lines = [ln.rstrip() for ln in f]
     i = 0
     n = len(lines)
-    # find NODE_COORD_SECTION
+
+    # header
     while i < n and not lines[i].startswith('NODE_COORD_SECTION'):
         i += 1
     if i < n and lines[i].startswith('NODE_COORD_SECTION'):
