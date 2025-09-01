@@ -21,3 +21,22 @@ python -m evrp.plotting --instance data/E-n29-k4-s7.evrp --out output/E-n29-k4-s
 - Plots node identifiers, stations (blue P marker) and depot (red star)
 - Saves to `_nodes.png` by default
 
+### Comparer plusieurs solutions dans une seule image
+
+```
+python -m evrp.plotting \
+  --compare output/solution_alns.json output/solution_ortools.json output/solution_ga.json \
+  --labels ALNS OR-Tools GA \
+  --out output/solutions_compare.png
+```
+
+API Python:
+
+```
+from evrp.plotting import plot_compare_solutions
+plot_compare_solutions([
+    'output/solution_alns.json',
+    'output/solution_ortools.json',
+    'output/solution_ga.json',
+], labels=['ALNS', 'OR-Tools', 'GA'], out_path='output/solutions_compare.png')
+```

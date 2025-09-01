@@ -113,6 +113,107 @@ def plot_sol(sol_path, out_path=None, show=False, figsize=(10, 8)):
     return out_path
 
 
+def plot_compare_solutions(sol_paths, labels=None, out_path=None, show=False, figsize=(16, 5)):
+    """Plot up to three solution JSON files side-by-side in one figure.
+
+    Parameters
+    ----------
+    sol_paths : list[str]
+        Paths to solution JSON files (2 or 3 recommended).
+    labels : list[str], optional
+        Titles for each subplot (e.g., solver names). If None, file basenames are used.
+    out_path : str, optional
+        Output image path. Defaults to `<first>_compare.png`.
+    show : bool, optional
+        Display the figure interactively.
+    figsize : tuple, optional
+        Figure size in inches.
+
+    Returns
+    -------
+    str
+        Path to the saved image.
+    """
+    if not sol_paths:
+        raise ValueError("No solution paths provided")
+    k = len(sol_paths)
+    if labels is None:
+        labels = [os.path.splitext(os.path.basename(p))[0] for p in sol_paths]
+    else:
+        labels = list(labels) + [""] * max(0, k - len(labels))
+
+    # helper to load one solution
+    def _load_sol(path):
+        with open(path, "r") as f:
+            sol = json.load(f)
+        routes = sol.get("routes", [])
+        coords = sol.get("coords", {})
+        coord_map = {int(k): np.array(v, dtype=float) for k, v in coords.items()}
+        # guess depot
+        depot_id = 0
+        if depot_id not in coord_map and routes and routes[0]:
+            depot_id = int(routes[0][0])
+        return routes, coord_map, depot_id
+
+    ncols = k
+    nrows = 1
+    fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    cmap = plt.get_cmap('tab10')
+
+    for idx, path in enumerate(sol_paths):
+        ax = axes[0, idx]
+        try:
+            routes, coord_map, depot_id = _load_sol(path)
+        except Exception as e:
+            ax.set_title(f"{labels[idx]} — error loading\n{os.path.basename(path)}")
+            ax.text(0.5, 0.5, str(e), ha='center', va='center', transform=ax.transAxes)
+            ax.axis('off')
+            continue
+        # plot routes
+        for i, route in enumerate(routes):
+            if not route:
+                continue
+            pts = [coord_map.get(int(n)) for n in route if int(n) in coord_map]
+            if not pts:
+                continue
+            pts = np.vstack(pts)
+            color = cmap(i % 10)
+            ax.plot(pts[:, 0], pts[:, 1], '-', color=color, linewidth=2, alpha=0.8)
+            if len(pts) > 2:
+                ax.scatter(pts[1:-1, 0], pts[1:-1, 1], c=[color], s=25)
+            ax.scatter(pts[0, 0], pts[0, 1], c='k', marker='s', s=50, zorder=5)
+            ax.scatter(pts[-1, 0], pts[-1, 1], c='k', marker='o', s=50, zorder=5)
+            # annotate visit numbers
+            for step, node in enumerate(route[1:-1], start=1):
+                nid = int(node)
+                if nid in coord_map:
+                    x, y = coord_map[nid]
+                    ax.annotate(str(step), (x, y), textcoords="offset points", xytext=(2, 2), fontsize=7, color=color)
+
+        # depot
+        if depot_id in coord_map:
+            d = coord_map[depot_id]
+            ax.scatter(d[0], d[1], c='red', marker='*', s=120, zorder=10)
+        ax.set_title(labels[idx])
+        ax.set_xlabel('X')
+        if idx == 0:
+            ax.set_ylabel('Y')
+        ax.axis('equal')
+        ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    if out_path is None:
+        base = os.path.splitext(sol_paths[0])[0]
+        out_path = base + '_compare.png'
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    fig.savefig(out_path, dpi=300, bbox_inches="tight", facecolor="white")
+    print(f"Saved comparison plot to {out_path}")
+    if show:
+        plt.show()
+    plt.close(fig)
+    return out_path
+
+
 def parse_file(path):
     """Lightweight parser for .evrp files used in this repo.
 
@@ -251,7 +352,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Plot EVRP instance and/or solution')
     parser.add_argument('--instance', help='Path to .evrp instance file', default=None)
     parser.add_argument('--solution', help='Path to solution JSON', default=None)
-    parser.add_argument('--out', help='Output PNG path for solution (or instance if only instance provided)', default=None)
+    parser.add_argument('--compare', nargs='+', help='Paths to 2-3 solution JSON files to compare side-by-side', default=None)
+    parser.add_argument('--labels', nargs='+', help='Labels for compared solutions (same order as --compare)', default=None)
+    parser.add_argument('--out', help='Output PNG path for solution/instance/compare', default=None)
     parser.add_argument('--show', action='store_true', help='Show plot interactively')
     args = parser.parse_args()
     # If instance provided, first plot nodes
@@ -263,5 +366,8 @@ if __name__ == '__main__':
     # Then plot solution if provided
     if args.solution:
         plot_sol(args.solution, out_path=args.out, show=args.show)
+    # Or compare multiple solutions
+    if args.compare:
+        plot_compare_solutions(args.compare, labels=args.labels, out_path=args.out, show=args.show)
     if not args.instance and not args.solution:
         parser.print_help()
