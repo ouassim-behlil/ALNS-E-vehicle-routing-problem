@@ -108,3 +108,5 @@ Notes
 License
 This project is licensed under the terms in LICENSE.
 
+Further documentation
+- Full docs with installation, usage, data formats, algorithms, benchmarking, robustness, plotting, and per-module API: see `docs/index.md`

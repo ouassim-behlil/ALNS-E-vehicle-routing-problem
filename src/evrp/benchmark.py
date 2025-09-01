@@ -22,10 +22,34 @@ def _solution_cost(solution: Dict, dist) -> float:
     return total
 
 
+def _route_time(route: List[int], dist, mu) -> float:
+    """Compute expected time of a route using mu (fallback to dist/40)."""
+    t = 0.0
+    for i in range(len(route) - 1):
+        a, b = route[i], route[i + 1]
+        try:
+            t += float(mu[a, b])
+        except Exception:
+            # Fallback to distance-based time at 40 units/hour
+            t += float(dist[a, b]) / 40.0
+    return t
+
+
+def _solution_time_variance(solution: Dict, dist, mu) -> float:
+    """Compute variance of route durations (expected time) across all routes."""
+    routes = solution.get("routes", [])
+    if not routes:
+        return 0.0
+    times = [_route_time(r, dist, mu) for r in routes]
+    mean_t = sum(times) / len(times)
+    var = sum((t - mean_t) ** 2 for t in times) / len(times)
+    return var
+
+
 def run_instance(path: Path, solvers: List[str], iterations: int) -> List[Dict]:
     """Run selected solvers on a single instance file and return metrics."""
     nodes, links, requests, fleet = build_problem_from_evrp(str(path))
-    dist, _, _ = build_matrices(nodes, links)
+    dist, mu, _ = build_matrices(nodes, links)
 
     results = []
     for name in solvers:
@@ -43,12 +67,12 @@ def run_instance(path: Path, solvers: List[str], iterations: int) -> List[Dict]:
             continue
         elapsed = time.perf_counter() - start
         cost = _solution_cost(sol, dist)
-        unassigned = len(sol.get("unassigned", []))
+        variance = _solution_time_variance(sol, dist, mu)
         results.append({
             "instance": path.name,
             "solver": name,
             "cost": cost,
-            "unassigned": unassigned,
+            "variance": variance,
             "time": elapsed,
         })
     return results
@@ -83,11 +107,11 @@ def main():
         print("No results")
         return
 
-    header = f"{'instance':30} {'solver':10} {'cost':>10} {'unassigned':>10} {'time(s)':>10}"
+    header = f"{'instance':30} {'solver':10} {'cost':>10} {'variance':>10} {'time(s)':>10}"
     print(header)
     print("-" * len(header))
     for r in results:
-        print(f"{r['instance']:30} {r['solver']:10} {r['cost']:10.2f} {r['unassigned']:10d} {r['time']:10.2f}")
+        print(f"{r['instance']:30} {r['solver']:10} {r['cost']:10.2f} {r['variance']:10.2f} {r['time']:10.2f}")
 
 
 if __name__ == "__main__":
